@@ -1,0 +1,156 @@
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.1
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.1
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+
+  kafka-init:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "scripts.create_topics"]
+    depends_on:
+      - kafka
+    environment:
+      - PYTHONPATH=/app
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--maxmemory", "${REDIS_MAXMEMORY:-256mb}", "--maxmemory-policy", "${REDIS_MAXMEMORY_POLICY:-allkeys-lru}", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+
+  metrics-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["uvicorn", "services.metrics_service.app:app", "--host", "0.0.0.0", "--port", "8002"]
+    volumes:
+      - ./data:/data
+      - ./shared:/app/shared
+      - ./services:/app/services
+    environment:
+      - PYTHONPATH=/app
+    ports:
+      - "8002:8002"
+
+  response-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["uvicorn", "services.response_service.app:app", "--host", "0.0.0.0", "--port", "8001"]
+    volumes:
+      - ./data:/app/data
+      - ./shared:/app/shared
+      - ./services:/app/services
+    environment:
+      - PYTHONPATH=/app
+      - DATASET_PATH=/app/data/buildings_sample.csv
+      - RESPONSE_DELAY_MS=0
+      - RESPONSE_FAILURE_RATE=0.0
+    ports:
+      - "8001:8001"
+
+  cache-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["uvicorn", "services.cache_service.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    volumes:
+      - ./data:/data
+      - ./shared:/app/shared
+      - ./services:/app/services
+    environment:
+      - PYTHONPATH=/app
+      - REDIS_URL=redis://redis:6379/0
+      - RESPONSE_SERVICE_URL=http://response-service:8001
+      - METRICS_SERVICE_URL=http://metrics-service:8002
+      - CACHE_TTL_SECONDS=60
+    depends_on:
+      - redis
+      - response-service
+      - metrics-service
+    ports:
+      - "8000:8000"
+
+  kafka-consumer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["uvicorn", "services.kafka_consumer_service.app:app", "--host", "0.0.0.0", "--port", "8003"]
+    volumes:
+      - ./data:/app/data
+      - ./shared:/app/shared
+      - ./services:/app/services
+    environment:
+      - PYTHONPATH=/app
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - REDIS_URL=redis://redis:6379/0
+      - RESPONSE_SERVICE_URL=http://response-service:8001
+      - CACHE_SERVICE_URL=http://cache-service:8000
+      - METRICS_SERVICE_URL=http://metrics-service:8002
+      - KAFKA_GROUP_ID=sd-task2-consumers
+      - MAX_RETRIES=2
+      - RETRY_DELAYS_SECONDS=1,5
+      - KAFKA_RETRY_TOPICS=queries.retry.1s,queries.retry.5s
+    depends_on:
+      - kafka-init
+      - cache-service
+      - response-service
+      - metrics-service
+    ports:
+      - "8003:8003"
+
+  traffic-generator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "services.traffic_generator.app", "--mode", "kafka", "--distribution", "zipf", "--requests", "200", "--delay-ms", "20", "--cycles", "1"]
+    volumes:
+      - ./data:/data
+      - ./shared:/app/shared
+      - ./services:/app/services
+    environment:
+      - PYTHONPATH=/app
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - CACHE_SERVICE_URL=http://cache-service:8000
+      - METRICS_SERVICE_URL=http://metrics-service:8002
+    depends_on:
+      - kafka-init
+      - kafka-consumer
+
+  dashboard:
+    image: python:3.11-slim
+    working_dir: /app
+    command: bash -lc "pip install --no-cache-dir streamlit pandas matplotlib requests streamlit-autorefresh && streamlit run dashboard/streamlit_app.py --server.address 0.0.0.0 --server.port 8501"
+    volumes:
+      - ./:/app
+      - ./data:/data
+    ports:
+      - "8501:8501"
+    environment:
+      - METRICS_SERVICE_URL=http://metrics-service:8002
+    depends_on:
+      - metrics-service

@@ -1,0 +1,13 @@
+{
+  "count": 200,
+  "hits": 41,
+  "misses": 159,
+  "hit_rate": 0.205,
+  "miss_rate": 0.795,
+  "latency_p50_ms": 6.418113999870911,
+  "latency_p95_ms": 15.393805199846609,
+  "throughput_qps": 11.995959193471217,
+  "eviction_rate_per_min": 0.0,
+  "cache_efficiency": -373.2072870011507,
+  "evicted_keys_total": 0
+}
