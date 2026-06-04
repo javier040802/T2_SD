@@ -124,7 +124,12 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    command: ["python", "-m", "services.traffic_generator.app", "--mode", "kafka", "--distribution", "zipf", "--requests", "200", "--delay-ms", "20", "--cycles", "1"]
+    command:
+      - bash
+      - -c
+      - |
+        sleep 20
+        python -m services.traffic_generator.app --mode kafka --distribution zipf --requests 200 --delay-ms 20 --cycles 1
     volumes:
       - ./data:/data
       - ./shared:/app/shared
